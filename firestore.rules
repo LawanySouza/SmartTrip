@@ -1,0 +1,114 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Funções Auxiliares de Segurança ─────────────────────────────────────
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.role == 'admin';
+    }
+
+    // ── 1. Entidade users: /users/{userId} ──────────────────────────────────
+    match /users/{userId} {
+      // Leitura: apenas o próprio usuário ou admin
+      allow read: if isOwner(userId) || isAdmin();
+
+      // Criação: somente com seu próprio UID, papel 'user' obrigatório, sem autoelevação
+      allow create: if isOwner(userId)
+                    && request.resource.data.role == 'user'
+                    && request.resource.data.isPro == false
+                    && request.resource.data.createdAt == request.time
+                    && request.resource.data.updatedAt == request.time;
+
+      // Atualização: não pode autoelevar role nem alterar email ou createdAt
+      allow update: if isOwner(userId)
+                    && request.resource.data.role == resource.data.role
+                    && request.resource.data.isPro == resource.data.isPro
+                    && request.resource.data.email == resource.data.email
+                    && request.resource.data.createdAt == resource.data.createdAt
+                    && request.resource.data.updatedAt == request.time;
+
+      // Exclusão: proibida diretamente pelo cliente comum
+      allow delete: if isAdmin();
+
+      // ── 2. Entidade preferences: /users/{userId}/settings/preferences ──────
+      match /settings/preferences {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if isOwner(userId)
+                     && request.resource.data.travelStyle in ['relaxed', 'moderate', 'intense']
+                     && request.resource.data.budget in ['budget', 'moderate', 'luxury']
+                     && request.resource.data.updatedAt == request.time;
+      }
+
+      // ── 3. Entidade availability: /users/{userId}/availability/{id} ────────
+      match /availability/{availabilityId} {
+        allow read: if isOwner(userId) || isAdmin();
+
+        allow create: if isOwner(userId)
+                      && request.resource.data.userId == userId
+                      && request.resource.data.durationDays > 0
+                      && request.resource.data.startDate <= request.resource.data.endDate
+                      && request.resource.data.createdAt == request.time
+                      && request.resource.data.updatedAt == request.time;
+
+        allow update: if isOwner(userId)
+                      && request.resource.data.userId == userId
+                      && request.resource.data.createdAt == resource.data.createdAt
+                      && request.resource.data.updatedAt == request.time;
+
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    // ── 4. Entidade trips: /trips/{tripId} (Coleção Raiz) ───────────────────
+    match /trips/{tripId} {
+      // Leitura: proprietário, admin ou viagens públicas
+      allow read: if isOwner(resource.data.userId)
+                  || resource.data.visibility == 'public'
+                  || isAdmin();
+
+      // Criação: autenticado, autor da viagem, com timestamps válidos
+      allow create: if isAuthenticated()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.daysCount > 0
+                    && request.resource.data.createdAt == request.time
+                    && request.resource.data.updatedAt == request.time;
+
+      // Atualização: apenas o proprietário
+      allow update: if isOwner(resource.data.userId)
+                    && request.resource.data.userId == resource.data.userId
+                    && request.resource.data.createdAt == resource.data.createdAt
+                    && request.resource.data.updatedAt == request.time;
+
+      // Exclusão: apenas o proprietário ou admin
+      allow delete: if isOwner(resource.data.userId) || isAdmin();
+
+      // ── 5. Entidade itineraryItems: /trips/{tripId}/itineraryItems/{itemId} ─
+      match /itineraryItems/{itemId} {
+        function getTrip() {
+          return get(/databases/$(database)/documents/trips/$(tripId)).data;
+        }
+
+        allow read: if isOwner(getTrip().userId)
+                    || getTrip().visibility == 'public'
+                    || isAdmin();
+
+        allow write: if isOwner(getTrip().userId) || isAdmin();
+      }
+    }
+
+    // Bloqueia qualquer outra rota por padrão
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
